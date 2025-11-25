@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Plantilla de CloudFormation para el sistema de clasificación de fruta basado en YOLO (API Gateway, Lambda y DynamoDB), incluyendo el endpoint para Dashboard/Stats.
+
+# -------------------------------------------------------------------
+# Parámetros de Configuración
+# -------------------------------------------------------------------
+Parameters:
+  ProjectEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: Entorno de despliegue (usado para nombrar recursos).
+  LambdaHandlerPath:
+    Type: String
+    Default: index.handler
+    Description: El nombre de archivo y función del manejador de Lambda.
+
+# -------------------------------------------------------------------
+# Recursos
+# -------------------------------------------------------------------
+Resources:
+
+  # =================================================================
+  # 1. DynamoDB: Tabla para almacenar los contadores y registros
+  # =================================================================
+  FruitClassificationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "FruitClassifierLog-${ProjectEnvironment}"
+      AttributeDefinitions:
+        # Clave de partición: Usamos el estado (Ripe/Spoiled/Good/Bad)
+        - AttributeName: "Classification"
+          AttributeType: "S"
+        # Clave de ordenación: Usamos un timestamp o ID único
+        - AttributeName: "Timestamp"
+          AttributeType: "S" 
+      KeySchema:
+        - AttributeName: "Classification"
+          KeyType: "HASH"
+        - AttributeName: "Timestamp"
+          KeyType: "RANGE"
+      # Configuración de rendimiento (Modo bajo demanda recomendado para cargas variables)
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: Environment
+          Value: !Ref ProjectEnvironment
+        - Key: Project
+          Value: FruitSorter
+
+  # =================================================================
+  # 2. IAM Role: Permisos para Lambda (Un solo rol para ambas funciones)
+  # =================================================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        # Política para permitir logs en CloudWatch
+        - PolicyName: LambdaCloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        # Política para permitir ACCESO TOTAL (Lectura y Escritura) a DynamoDB
+        - PolicyName: DynamoDBReadWriteAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem    # Escritura (para la Lambda de Inserción)
+                  - dynamodb:Scan     # Lectura (para la Lambda de Estadísticas)
+                  - dynamodb:Query
+                Resource: !GetAtt FruitClassificationTable.Arn # Referencia el ARN de la tabla
+
+  # =================================================================
+  # 3A. Lambda: Función de Inserción (Escribe datos desde la Laptop)
+  # =================================================================
+  FruitClassifierInsertLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "FruitClassifierInsert-${ProjectEnvironment}"
+      Handler: !Ref LambdaHandlerPath
+      Runtime: python3.10
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Code:
+        # Código para la inserción (similar al anterior)
+        ZipFile: |
+          import json
+          import os
+          import datetime
+          import boto3
+
+          DYNAMODB_CLIENT = boto3.client('dynamodb')
+          TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+
+          def handler(event, context):
+              try:
+                  # Obtener datos del cuerpo de la peticion POST
+                  body = json.loads(event['body'])
+                  
+                  classification_result = body.get('classification', 'UNKNOWN')
+                  
+                  timestamp = datetime.datetime.now().isoformat()
+                  
+                  item = {
+                      'Classification': {'S': classification_result},
+                      'Timestamp': {'S': timestamp},
+                      'Confidence': {'N': str(body.get('confidence', 0))},
+                      'DeviceID': {'S': body.get('device_id', 'LAPTOP_YOLO')}
+                  }
+                  
+                  DYNAMODB_CLIENT.put_item(
+                      TableName=TABLE_NAME,
+                      Item=item
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'message': 'Registro exitoso'})
+                  }
+              except Exception as e:
+                  print(f"Error en inserción: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref FruitClassificationTable
+
+  # =================================================================
+  # 3B. Lambda: Función de Estadísticas (Lee datos para el Dashboard)
+  # =================================================================
+  FruitClassifierStatsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "FruitClassifierStats-${ProjectEnvironment}"
+      Handler: !Ref LambdaHandlerPath
+      Runtime: python3.10
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Code:
+        # Código para consultar la tabla
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          DYNAMODB_CLIENT = boto3.client('dynamodb')
+          TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+
+          def handler(event, context):
+              try:
+                  # Realizar un Scan para obtener todos los ítems (simple para dashboards pequeños)
+                  response = DYNAMODB_CLIENT.scan(
+                      TableName=TABLE_NAME,
+                      Select='ALL_ATTRIBUTES'
+                  )
+                  
+                  # Procesar resultados para generar estadísticas simples (conteo)
+                  total_count = response['Count']
+                  stats = {}
+                  for item in response['Items']:
+                      classification = item['Classification']['S']
+                      stats[classification] = stats.get(classification, 0) + 1
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          # Habilitar CORS para que Vercel (o cualquier frontend) pueda llamar a esta API
+                          'Access-Control-Allow-Origin': '*' 
+                      },
+                      'body': json.dumps({
+                          'total_items': total_count,
+                          'classification_counts': stats
+                      }, default=str)
+                  }
+              except Exception as e:
+                  print(f"Error en estadísticas: {e}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref FruitClassificationTable
+
+  # =================================================================
+  # 4. API Gateway: Configuración y Endpoints
+  # =================================================================
+  FruitClassifierAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "FruitClassifierAPI-${ProjectEnvironment}"
+      Description: API para recibir los resultados de inferencia de YOLO y servir estadísticas.
+      
+  # 4.1. Recurso de Inserción (/classify)
+  ApiResourceClassify:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref FruitClassifierAPI
+      ParentId: !GetAtt FruitClassifierAPI.RootResourceId
+      PathPart: "classify"
+
+  # 4.2. Método POST para Inserción (Conecta con FruitClassifierInsertLambda)
+  ApiMethodPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FruitClassifierAPI
+      ResourceId: !Ref ApiResourceClassify
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY # Usamos el proxy para simplificar la integración
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FruitClassifierInsertLambda.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+
+  # 4.3. Recurso de Estadísticas (/stats)
+  ApiResourceStats:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref FruitClassifierAPI
+      ParentId: !GetAtt FruitClassifierAPI.RootResourceId
+      PathPart: "stats"
+      
+  # 4.4. Método GET para Estadísticas (Conecta con FruitClassifierStatsLambda)
+  ApiMethodGetStats:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref FruitClassifierAPI
+      ResourceId: !Ref ApiResourceStats
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY # Usamos el proxy para simplificar la integración
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FruitClassifierStatsLambda.Arn}/invocations"
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+
+  # 4.5. Permisos Lambda: Inserción
+  ApiGatewayInvokePermissionInsert:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref FruitClassifierInsertLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FruitClassifierAPI}/*/*"
+
+  # 4.6. Permisos Lambda: Estadísticas
+  ApiGatewayInvokePermissionStats:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref FruitClassifierStatsLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FruitClassifierAPI}/*/*"
+      
+  # 4.7. Stage de Despliegue (Asegura el despliegue de ambos métodos)
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - ApiMethodPost
+      - ApiMethodGetStats # Depende de ambos métodos
+    Properties:
+      RestApiId: !Ref FruitClassifierAPI
+      
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: !Ref ProjectEnvironment
+      Description: Stage de despliegue para clasificacion y estadisticas
+      RestApiId: !Ref FruitClassifierAPI
+      DeploymentId: !Ref ApiDeployment
+
+# -------------------------------------------------------------------
+# Salidas (Outputs)
+# -------------------------------------------------------------------
+Outputs:
+  InsertApiUrl:
+    Description: URL del endpoint para la laptop (POST /classify) para enviar resultados.
+    Value: !Sub "https://${FruitClassifierAPI}.execute-api.${AWS::Region}.amazonaws.com/${ProjectEnvironment}/classify"
+    Export:
+      Name: !Sub "FruitClassifier-InsertApiUrl-${ProjectEnvironment}"
+  StatsApiUrl:
+    Description: URL del endpoint para el Dashboard de Vercel (GET /stats) para obtener estadísticas.
+    Value: !Sub "https://${FruitClassifierAPI}.execute-api.${AWS::Region}.amazonaws.com/${ProjectEnvironment}/stats"
+    Export:
+      Name: !Sub "FruitClassifier-StatsApiUrl-${ProjectEnvironment}"
+  DynamoDBTableName:
+    Description: Nombre de la tabla DynamoDB
+    Value: !Ref FruitClassificationTable
+    Export:
+      Name: !Sub "FruitClassifier-DynamoTableName-${ProjectEnvironment}"
