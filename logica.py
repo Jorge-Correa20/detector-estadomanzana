@@ -7,7 +7,7 @@ import time
 # --- CONFIGURACIÓN DE AWS ---
 # ¡IMPORTANTE! Reemplaza esta URL con el valor de 'InsertApiUrl'
 # que obtuviste en la salida (Outputs) de tu despliegue de CloudFormation.
-AWS_INSERT_API_URL = "https://TU_API_GATEWAY_ID.execute-api.REGION.amazonaws.com/dev/classify" 
+AWS_INSERT_API_URL = "https://f5278inwic.execute-api.us-east-2.amazonaws.com/dev/classify" 
 
 # --- CONFIGURACIÓN YOLO ---
 # Carga el modelo entrenado

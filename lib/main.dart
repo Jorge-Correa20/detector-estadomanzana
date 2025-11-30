@@ -48,7 +48,7 @@ class AppleStatsDashboard extends StatefulWidget {
 class _AppleStatsDashboardState extends State<AppleStatsDashboard> {
   // --- CONFIGURACIÓN AWS (REEMPLAZAR) ---
   // ¡IMPORTANTE! Reemplaza esto con la URL de salida 'StatsApiUrl' de CloudFormation
-  final String _statsApiUrl = "https://TU_API_GATEWAY_ID.execute-api.REGION.amazonaws.com/dev/stats"; 
+  final String _statsApiUrl = "https://f5278inwic.execute-api.us-east-2.amazonaws.com/dev/stats";
 
   // Variables de Estado (Contadores leídos de DynamoDB)
   int _totalCount = 0;
@@ -66,7 +66,7 @@ class _AppleStatsDashboardState extends State<AppleStatsDashboard> {
     // Inicia la primera carga de datos
     _fetchStatsFromAWS();
     // Configura un temporizador para refrescar los datos cada 5 segundos
-    _timer = Timer.periodic(const Duration(seconds: 5), (timer) {
+    _timer = Timer.periodic(const Duration(seconds: 2), (timer) {
       _fetchStatsFromAWS();
     });
   }
@@ -85,9 +85,10 @@ class _AppleStatsDashboardState extends State<AppleStatsDashboard> {
 
       if (response.statusCode == 200) {
         // La Lambda devuelve el cuerpo como una cadena JSON, por eso usamos jsonDecode
-        final data = jsonDecode(response.body); 
+        //final data = jsonDecode(response.body); 
         // El cuerpo real es una cadena JSON dentro de otra cadena JSON debido a la integración proxy de Lambda/API Gateway
-        final payload = jsonDecode(data); 
+        final payload = jsonDecode(response.body);
+
 
         setState(() {
           _totalCount = payload['total_items'] ?? 0;
