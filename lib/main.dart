@@ -37,7 +37,7 @@ class _AppleStatsDashboardState extends State<AppleStatsDashboard> {
   final String _statsApiUrl = "https://f5278inwic.execute-api.us-east-2.amazonaws.com/dev/stats";
 
   int _totalCount = 0;
-  Map<String, int> _counts = {};
+  Map<String, int> _counts =  {};
   bool _isLoading = true;
   Timer? _timer;
   String _errorMessage = ""; // Para ver errores en pantalla si ocurren
