@@ -202,7 +202,7 @@ Resources:
                   }
       Environment:
         Variables:
-          DYNAMODB_TABLE_NAME: !Ref FruitClassificationTable
+          DYNAMODB_TABLE_NAME: !Ref FruitClassificationTable.TableName
 
   # =================================================================
   # 4. API Gateway: Configuración y Endpoints
